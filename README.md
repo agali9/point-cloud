@@ -1,5 +1,5 @@
 ﻿# pointcloud-pipeline
 
-Open3D prototype for moving point clouds into a small C++ project. The first
-version is just enough to verify point storage and conversion before adding the
-actual processing steps.
+Small C++ point cloud pipeline for class/research work. The project now has a
+basic pipeline object that accepts `PointXYZ` vectors and returns the processed
+cloud, which gives the next algorithms one API to plug into.
