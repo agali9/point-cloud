@@ -16,14 +16,17 @@ The core pipeline does three things:
 ```text
 include/                  Public C++ headers
 src/                      Shared library implementation
+src/cuda/                 Optional CUDA preprocess (filter + voxel)
 python/                   pybind11 bindings
 ros2/pointcloud_pipeline_ros/
                            ROS 2 wrapper package
 tests/                    C++ and Python tests
 benchmarks/               Synthetic LiDAR benchmark
 examples/                 Small C++ and Python examples
-docs/                     Architecture and performance notes
+docs/                     Architecture, performance, and CUDA notes
 ```
+
+
 
 ## Architecture
 
@@ -41,12 +44,16 @@ flowchart LR
     E --> H["ROS 2 topics"]
 ```
 
+
+
 The main API is:
 
 ```cpp
 pointcloud_pipeline::PointCloudPipeline pipeline(config);
 pointcloud_pipeline::PipelineResult result = pipeline.process(points);
 ```
+
+
 
 ## Native Build
 
@@ -56,9 +63,9 @@ cmake --build build --config Release
 ctest --test-dir build --output-on-failure
 ```
 
-The build uses `-Wall -Wextra -Wpedantic` on GCC/Clang and `/W4` on MSVC. Open3D
-and pybind11 are detected automatically when installed. The core C++ library and
-tests still build without them.
+The build uses `-Wall -Wextra -Wpedantic` on GCC/Clang and `/W4` on MSVC. Open3D,
+pybind11, and CUDA are detected when installed. The core C++ library and tests
+still build without them.
 
 ## Python Build and Usage
 
@@ -124,6 +131,30 @@ The node subscribes to `/points_raw`, publishes `processed_cloud`, and publishes
 `cluster_markers` for RViz. Processing is done by the shared library, not by a
 second ROS-only implementation.
 
+## CUDA Backend
+
+The optional CUDA path accelerates pass-through filtering and voxel downsampling on NVIDIA GPUs, then runs Euclidean clustering on the CPU. Build with `-DPOINTCLOUD_PIPELINE_USE_CUDA=ON` when the CUDA toolkit is installed.
+
+```cpp
+pointcloud_pipeline::PipelineConfig config;
+config.backend = pointcloud_pipeline::ExecutionBackend::CUDA;
+config.filter.enable_statistical_outlier_removal = false;
+```
+
+Python:
+
+```python
+result = pcp.run_pipeline(cloud, use_cuda=True, enable_statistical_outlier_removal=False)
+```
+
+ROS 2:
+
+```bash
+ros2 launch pointcloud_pipeline_ros pipeline.launch.py use_cuda:=true
+```
+
+See `docs/cuda.md` for architecture notes, parity tests, and benchmark commands.
+
 ## Benchmarks
 
 Build and run:
@@ -141,12 +172,35 @@ The benchmark generates deterministic synthetic LiDAR point clouds at 100k,
 - Downsampled: filtering, voxel grid, then segmentation.
 
 The program measures real wall-clock frame times and computes mean, median, P95,
-and speedup. Results are intentionally not hardcoded.
+and speedup.
+
+CPU voxel downsampling vs baseline (Windows, MSVC Release):
 
 <!-- BENCHMARK_TABLE_BEGIN -->
-Run `pointcloud_pipeline_benchmark --update-readme` to generate this table on
-your machine.
+| Points | Baseline mean ms | Downsampled mean ms | Baseline P95 ms | Downsampled P95 ms | Speedup |
+|---:|---:|---:|---:|---:|---:|
+| 100000 | 184.00 | 37.11 | 562.30 | 39.28 | 4.96x |
+| 250000 | 226.33 | 72.02 | 246.19 | 85.39 | 3.14x |
+| 500000 | 538.94 | 234.55 | 559.70 | 255.75 | 2.30x |
+| 1000000 | 1020.39 | 509.63 | 1192.57 | 572.27 | 2.00x |
 <!-- BENCHMARK_TABLE_END -->
+
+CUDA hybrid path (same machine: CUDA 13.3, NVIDIA GeForce RTX 5070 Laptop GPU). GPU filter + voxel, then CPU clustering. GPU compute is filter+voxel only; H2D+D2H is PCIe transfer.
+
+```bash
+./build/Release/pointcloud_pipeline_benchmark --cuda --update-readme
+```
+
+<!-- CUDA_BENCHMARK_TABLE_BEGIN -->
+| Points | CPU mean ms | GPU total mean ms | GPU compute mean ms | H2D+D2H mean ms | Speedup |
+|---:|---:|---:|---:|---:|---:|
+| 100000 | 15.00 | 22.83 | 4.75 | 2.64 | 0.66x |
+| 250000 | 61.05 | 50.94 | 6.79 | 5.45 | 1.20x |
+| 500000 | 207.85 | 151.91 | 10.22 | 12.81 | 1.37x |
+| 1000000 | 579.07 | 444.44 | 32.04 | 23.83 | 1.30x |
+<!-- CUDA_BENCHMARK_TABLE_END -->
+
+
 
 ## Performance Discussion
 
@@ -197,12 +251,3 @@ ctest --test-dir build-coverage --output-on-failure
 ```
 
 The intended target is at least 80% line coverage for the core library.
-
-## Engineering Notes
-
-This code avoids large frameworks and advanced template tricks on purpose. The
-algorithms are written directly so the data flow is easy to inspect in a
-portfolio or class project review. The places that matter for performance are
-still handled carefully: contiguous point storage, hash grids, move semantics,
-and no allocation-heavy work inside the innermost distance checks beyond the
-small search containers needed for deterministic filtering.
